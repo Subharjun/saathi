@@ -1,0 +1,23 @@
+# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Node / Expo
+mobile/node_modules/
+mobile/.expo/
+npm-debug.log*
+yarn-error.log*
+
+# Runtime data (generated)
+backend/data/reminders.json
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
+.idea/
+
+# Logs
+*.log
