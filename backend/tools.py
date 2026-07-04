@@ -4,6 +4,7 @@ Gemma 4 decides *which* of these to invoke and with *what* arguments; we execute
 them deterministically so eligibility is trustworthy (not hallucinated) and actions
 (reminders, pre-filled forms) are real artifacts the user can act on.
 """
+import inspect
 import json
 import os
 import time
@@ -133,4 +134,11 @@ def run_tool(name, args, profile):
     fn = REGISTRY.get(name)
     if not fn:
         return {"error": f"unknown tool {name}"}
-    return fn(profile, **args)
+    # Keep only args the tool actually accepts, so a hallucinated/extra key
+    # from the model can't crash the call.
+    accepted = set(inspect.signature(fn).parameters) - {"profile"}
+    clean = {k: v for k, v in (args or {}).items() if k in accepted}
+    try:
+        return fn(profile, **clean)
+    except TypeError as e:
+        return {"error": f"bad arguments for {name}: {e}"}

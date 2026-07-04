@@ -65,6 +65,9 @@ def analyze(req: AnalyzeRequest):
     retrieved = index.search(query, k=3)
 
     # 3) FUNCTION CALLING — Gemma decides which tools to run.
+    #    gemma3 on Ollama has no native `tools` API, so we do prompt-based tool
+    #    calling: Gemma emits a JSON plan of tool calls (still Gemma's decision),
+    #    and we execute them deterministically below.
     context = {
         "document": doc,
         "user_profile": req.profile,
@@ -74,22 +77,33 @@ def analyze(req: AnalyzeRequest):
         ],
         "user_question": req.question,
     }
-    sys = (
-        "You are Saathi. Help this West Bengal user understand their document and access government schemes. "
-        "Use check_eligibility on the most relevant candidate scheme(s). If there is a deadline or a camp date, "
-        "call set_reminder. If the user clearly wants to apply, call prefill_form. "
-        "Then reply to the user in warm, simple BENGALI."
+    tool_menu = "\n".join(
+        f'- {t["function"]["name"]}({", ".join(t["function"]["parameters"]["properties"].keys())}): '
+        f'{t["function"]["description"]}'
+        for t in TOOL_SPECS
     )
-    messages = [
-        {"role": "system", "content": sys},
-        {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-    ]
-    first = gemma.chat(messages, tools=TOOL_SPECS)
+    planner_sys = (
+        "You are Saathi's planner for a West Bengal user. Decide which tools to call. "
+        "Available tools:\n" + tool_menu + "\n"
+        "Use check_eligibility on the most relevant candidate scheme(s). If there is a deadline or a "
+        "camp date, call set_reminder. If the user clearly wants to apply, call prefill_form. "
+        "scheme_id values MUST come from candidate_schemes[].id. "
+        'Respond ONLY with JSON: {"tool_calls": [{"name": "<tool>", "arguments": {...}}]}. '
+        "Use an empty list if no tool is needed."
+    )
+    plan_msg = gemma.chat(
+        [
+            {"role": "system", "content": planner_sys},
+            {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+        ],
+        fmt="json",
+    )
+    plan = gemma.force_json(plan_msg)
 
     tool_results = []
-    for call in first.get("tool_calls", []) or []:
-        fn = call["function"]["name"]
-        args = call["function"].get("arguments", {})
+    for call in plan.get("tool_calls", []) or []:
+        fn = call.get("name")
+        args = call.get("arguments", {}) or {}
         if isinstance(args, str):
             try:
                 args = json.loads(args)
@@ -100,15 +114,35 @@ def analyze(req: AnalyzeRequest):
 
     # 4) FINAL ANSWER — feed tool results back for a grounded Bengali reply.
     if tool_results:
-        messages.append(first)
-        for tr in tool_results:
-            messages.append(
-                {"role": "tool", "content": json.dumps(tr["result"], ensure_ascii=False)}
-            )
-        final = gemma.chat(messages)
+        final_sys = (
+            "You are Saathi. Using the tool results, reply to the user in warm, simple BENGALI. "
+            "Explain their document, whether they qualify and why, the benefit, documents needed, "
+            "and any reminder set. Reply as a plain Bengali message, NOT JSON."
+        )
+        final = gemma.chat(
+            [
+                {"role": "system", "content": final_sys},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {"context": context, "tool_results": tool_results}, ensure_ascii=False
+                    ),
+                },
+            ]
+        )
         answer_bn = final.get("content", "")
     else:
-        answer_bn = first.get("content", "")
+        final = gemma.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "You are Saathi. Reply in warm, simple BENGALI, helping the user "
+                    "with their document and relevant government schemes.",
+                },
+                {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
+            ]
+        )
+        answer_bn = final.get("content", "")
 
     return {
         "document": doc,
